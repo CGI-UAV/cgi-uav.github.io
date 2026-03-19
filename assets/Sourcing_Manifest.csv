@@ -1,0 +1,20 @@
+Category,Component,Specification,Quantity
+Propulsion,Brushless Motor,2300kv,4
+Propulsion,Propellers,5-inch triblade,4
+Propulsion,ESC,20A DSHOT BLHeli_S 2-4S (Hole pads),4
+Compute & Control,Microcontroller,ESP32-S3,1
+Compute & Control,Edge Computer,Raspberry Pi 5,1
+Compute & Control,IMU Sensor,LSM9DS1,1
+Camera & Optics,Camera Module,IMX 219 (Raspberry Pi 5 Compatible),1
+Camera & Optics,CGI Array,16x32 LED Matrix (with connectors),1
+Camera & Optics,Matrix Controller,Adafruit Matrix Bonnet,1
+Power,LiPo Battery,14.8v 3300mAh 60c,1
+Power,Main Power Connector,Male T-Plug (Deans),1
+Power,Voltage Regulator (Flight),UBEC 5v 5A,1
+Power,Pi Power Supply,5v 4A DC Output PSU,1
+Hardware & Frame,3D Printer Filament,PLA (1kg),1
+Hardware & Frame,Motor Screws,M3 (12mm long),16
+Hardware & Frame,Frame Fasteners,#6x1-5/8" Drywall Screws (or similar),4
+Miscellaneous,Cables,Jumper cables (bulk),1
+Miscellaneous,SD Card,Micro SD + USB adapter,1
+Miscellaneous,Video,HDMI to Micro HDMI,1
