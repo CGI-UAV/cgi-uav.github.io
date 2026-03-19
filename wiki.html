@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Assembly Wiki - CGI-UAV.OS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #0f1115; color: #e8e8e8; }
+        .sidebar { background-color: #171a21; border-right: 1px solid #232834; }
+        .card { background-color: #1e222b; border: 1px solid #2d3342; }
+        .accent { color: #3b82f6; } 
+    </style>
+</head>
+<body class="flex h-screen font-sans overflow-hidden">
+    
+    <div class="w-64 sidebar p-6 hidden md:flex flex-col shadow-2xl z-10">
+        <h2 class="text-xl font-bold mb-8 text-white tracking-wider">CGI-UAV<span class="accent">.OS</span></h2>
+        <nav class="space-y-4 text-sm text-gray-400">
+            <a href="index.html#overview" class="block hover:text-white transition">Project Overview</a>
+            <a href="assets/CGI_CAD_Files.zip" download class="block hover:text-white transition">Modular CAD Files (.STL/.STEP)</a>
+            <a href="assets/Sourcing_Manifest.csv" download class="block hover:text-white transition">Hardware Bill of Materials</a>
+            <a href="https://github.com/cgi-uav/core" target="_blank" class="block hover:text-white transition">CGI-Core Python Library</a>
+            <a href="https://github.com/cgi-uav/firmware" target="_blank" class="block hover:text-white transition">ESP32 Flight Controller</a>
+            <a href="bom.html" class="block hover:text-white transition">Interactive BOM</a>
+            <a href="wiki.html" class="block text-white font-semibold flex items-center transition"><span class="w-2 h-2 rounded-full bg-blue-500 mr-2"></span>Assembly Wiki</a>
+        </nav>
+    </div>
+
+    <div class="flex-1 p-10 overflow-y-auto">
+        <h1 class="text-4xl font-extrabold text-white mb-2">Assembly Instructions</h1>
+        <p class="text-gray-400 mb-8">Step-by-step guide to building the physical drone frame and configuring the embedded electronics.</p>
+
+        <div class="card p-6 rounded-lg shadow-lg mb-6 border-l-4 border-l-blue-500">
+            <h2 class="text-2xl font-bold text-white mb-3">1. Chassis Preparation & Printing</h2>
+            <p class="text-gray-400 mb-3">Download the CAD files and print the 4 legs, drone body, top plate, and 4 propeller guards using PLA.</p>
+            <p class="text-gray-400">Slide the legs into the drone body. Drill one drywall screw through the holes on the body and legs (either top or bottom hole; use both if extra security is warranted) to lock them rigidly in place.</p>
+        </div>
+
+        <div class="card p-6 rounded-lg shadow-lg mb-6">
+            <h2 class="text-2xl font-bold text-white mb-3">2. ESC & Motor Wiring (Crucial Step)</h2>
+            <p class="text-gray-400 mb-4">You must test motor rotation direction before final soldering. Pass the 3 motor wires through the holes of the ESC before soldering. If a motor spins the wrong direction, <strong>simply swap any two of the three wires</strong> to reverse it.</p>
+            <p class="text-gray-400 mb-2">Use this test script on your ESP32 to verify direction via jumper cables:</p>
+            <div class="bg-black p-4 rounded text-blue-300 font-mono text-xs overflow-x-auto mb-4 border border-gray-700">
+<pre><code>#include &lt;Servo.h&gt;
+
+Servo esc;
+
+void setup() {
+  esc.attach(9); // Attach ESC to digital pin 9
+  Serial.begin(9600);
+  
+  // Arm the ESC
+  esc.writeMicroseconds(1000); 
+  Serial.println("Send 1000 to arm. Connect battery now.");
+  delay(7000);
+  Serial.println("ESC armed! Enter a value between 1100 and 1900.");
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    int throttle = Serial.parseInt();
+    if (throttle >= 1100 && throttle <= 1900) {
+      esc.writeMicroseconds(throttle);
+      Serial.print("Setting throttle to: ");
+      Serial.println(throttle);
+    }
+  }
+}</code></pre>
+            </div>
+            <p class="text-gray-400 text-sm bg-gray-800 p-3 rounded"><em>Note: Ensure you wrap electrical tape around bare metal on the ESCs to prevent shorts.</em></p>
+        </div>
+
+        <div class="card p-6 rounded-lg shadow-lg mb-6">
+            <h2 class="text-2xl font-bold text-white mb-3">3. Mounting the Propulsion System</h2>
+            <p class="text-gray-400 mb-3">Attach the motors and propeller guards using the M3 12mm screws. The propeller guard goes on top of the leg, and the motor goes on top of the guard, screwing directly into the holes on the bottom of the motor. Tighten securely.</p>
+            <div class="bg-red-900/30 border border-red-800 p-4 rounded mt-4">
+                <p class="text-red-400 font-bold mb-1">IMPORTANT: Firmware Orientation</p>
+                <p class="text-gray-300 text-sm">The flight controller code dictates specific motor rotations. Your physical wiring must match this exactly:<br>
+                • <strong>M1 (Front Left):</strong> Counter-Clockwise (CCW)<br>
+                • <strong>M2 (Front Right):</strong> Clockwise (CW)<br>
+                • <strong>M3 (Rear Right):</strong> Counter-Clockwise (CCW)<br>
+                • <strong>M4 (Rear Left):</strong> Clockwise (CW)</p>
+            </div>
+        </div>
+
+        <div class="card p-6 rounded-lg shadow-lg mb-6">
+            <h2 class="text-2xl font-bold text-white mb-3">4. Flight Controller & IMU Wiring</h2>
+            <p class="text-gray-400 mb-3">Place the ESP32 into a breadboard (you may need two small ones bridging together so all pins are accessible). Solder jumper cables to the ESC signal wires (Black and White) to allow stable connections to the ESP32.</p>
+            <ul class="list-disc list-inside text-gray-400 mb-4 space-y-1">
+                <li><strong>ESC Signal Pins:</strong> Pin 4 (FL), Pin 5 (FR), Pin 6 (RR), Pin 7 (RL).</li>
+                <li><strong>Grounds:</strong> Route all ESC signal grounds to a shared ESP32 ground pin.</li>
+            </ul>
+            <p class="text-gray-400 mb-2"><strong>LSM9DS1 IMU Setup:</strong> Attach the IMU to the breadboard. <strong>The X forward arrow must point to the front of the drone</strong> (indicated by the horizontal slit at the front of the frame).</p>
+            <ul class="list-disc list-inside text-gray-400 space-y-1">
+                <li>VIN -> ESP32 3.3v output</li>
+                <li>Ground -> Dedicated ESP32 Ground (separate from ESC grounds)</li>
+                <li>SDA -> Pin 8</li>
+                <li>SCL -> Pin 9</li>
+            </ul>
+        </div>
+
+        <div class="card p-6 rounded-lg shadow-lg mb-6">
+            <h2 class="text-2xl font-bold text-white mb-3">5. Power Distribution Hub</h2>
+            <p class="text-gray-400 mb-3">Place the LiPo battery in the middle compartment. Strip the wires for the male T-Plug connector, the UBEC, and the four ESCs.</p>
+            <ol class="list-decimal list-inside text-gray-400 space-y-2 mb-3">
+                <li>Twist all positive wires together and solder them uniformly.</li>
+                <li>Twist all ground wires together and solder them uniformly.</li>
+                <li>Solder the UBEC output to the ESP32 VIN and Ground.</li>
+            </ol>
+            <p class="text-gray-400">Cover all soldered junctions heavily in electrical tape. Ensure all wires are tucked securely inside the central frame hub.</p>
+        </div>
+
+        <div class="card p-6 rounded-lg shadow-lg mb-6">
+            <h2 class="text-2xl font-bold text-white mb-3">6. Flashing Firmware & Calibration</h2>
+            <p class="text-gray-400 mb-3">Connect the ESP32 to your computer via USB. Open the Arduino IDE.</p>
+            <ul class="list-disc list-inside text-gray-400 mb-4 space-y-1 text-sm">
+                <li>Install the ESP32 Board Manager in preferences.</li>
+                <li>Install required libraries: <code>ESP32Servo</code>, <code>Wire</code>, and your preferred <code>LSM9DS1</code> library.</li>
+                <li>Update the code with your WiFi SSID and Password.</li>
+                <li><strong>To Flash:</strong> Hold the BOOT button on the ESP32, tap the RESET button, release BOOT, and hit Upload in the IDE.</li>
+            </ul>
+            <p class="text-gray-400 mb-4">Once uploaded, open the Serial Monitor. Note the IP address printed—you will paste this into your browser to control the drone.</p>
+            
+            <h3 class="text-xl font-bold text-white mb-2">ESC Calibration</h3>
+            <p class="text-gray-400"><em>WARNING: Ensure propellers are REMOVED before calibration.</em><br>
+            To calibrate, your flight controller must send a maximum throttle signal (usually 2000us) as the ESCs boot. Power on the drone. The ESCs will play a musical tone. Immediately trigger the code to drop the signal to minimum (1000us). You will hear confirmation beeps indicating the throttle range is saved.</p>
+            <p class="text-gray-400 mt-4 font-bold text-blue-400">Attach the propellers matching the CW/CCW diagram, and you are ready to fly!</p>
+        </div>
+
+    </div>
+</body>
+</html>
