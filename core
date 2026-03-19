@@ -1,0 +1,175 @@
+import cv2
+import numpy as np
+import time
+from picamera2 import Picamera2
+import adafruit_blinka_raspberry_pi5_piomatter as piomatter
+from scipy.linalg import hadamard
+
+# ==============================================================================
+# 1. LED MATRIX CONFIGURATION (32x16 Native Hardware)
+# ==============================================================================
+geometry = piomatter.Geometry(
+    width=32,
+    height=16,
+    n_addr_lines=3,
+    rotation=piomatter.Orientation.Normal
+)
+
+framebuffer = np.zeros((16, 32, 3), dtype=np.uint8)
+
+matrix = piomatter.PioMatter(
+    colorspace=piomatter.Colorspace.RGB888Packed,
+    pinout=piomatter.Pinout.AdafruitMatrixBonnet,
+    framebuffer=framebuffer,
+    geometry=geometry
+)
+
+def display_binary_pattern(pattern):
+    """Displays a 2D numpy array (0s and 1s) on the LED matrix."""
+    pattern_255 = (pattern * 255).astype(np.uint8)
+    framebuffer[:, :, 0] = pattern_255
+    framebuffer[:, :, 1] = pattern_255
+    framebuffer[:, :, 2] = pattern_255
+    matrix.show()
+
+# ==============================================================================
+# 2. CAMERA SETUP (YUV420 for fast Luminance extraction)
+# ==============================================================================
+picam2 = Picamera2()
+config = picam2.create_preview_configuration(main={"size": (320, 240), "format": "YUV420"})
+picam2.configure(config)
+
+# ==============================================================================
+# 3. GHOST IMAGING PARAMETERS (32x16 Native Resolution)
+# ==============================================================================
+logical_width = 32
+logical_height = 16
+num_pixels = logical_width * logical_height  # 512 total pixels
+
+H_matrix = hadamard(num_pixels)
+
+# ==============================================================================
+# 4. MAIN ACQUISITION LOOP (DIFFERENTIAL)
+# ==============================================================================
+try:
+    picam2.start()
+    print("Warming up camera...")
+    time.sleep(2)
+    
+    # CRITICAL CALIBRATION: Locked to your optimal test values
+    picam2.set_controls({
+        "AeEnable": False,
+        "AwbEnable": False,
+        "ExposureTime": 10000,  
+        "AnalogueGain": 1.0     
+    })
+    
+    print("Flushing camera pipeline to lock in manual controls...")
+    # The Pipeline Flush: Prevents the auto-exposure from lagging into the math
+    for _ in range(5):
+        _ = picam2.capture_array('main')
+        time.sleep(0.1)
+
+    print(f"Starting Native 32x16 Hadamard Sequence: {num_pixels} measurement pairs...")
+    start_time = time.time()
+    
+    differential_intensities = np.zeros(num_pixels)
+    SYNC_DELAY = 0.05  # Proved perfect by your 0.05% variance test
+
+    for i in range(num_pixels):
+        h_pattern_physical = H_matrix[i].reshape((logical_height, logical_width))
+        
+        # --- POSITIVE PATTERN ---
+        pos_pattern = np.where(h_pattern_physical == 1, 1, 0)
+        display_binary_pattern(pos_pattern)
+        
+        time.sleep(SYNC_DELAY) 
+        _ = picam2.capture_array('main') # DUMMY READ: Dump stale buffer frame
+        
+        frame_pos = picam2.capture_array('main')
+        y_channel_pos = frame_pos[:240, :] 
+        I_pos = float(np.sum(y_channel_pos))
+        
+        # --- NEGATIVE (INVERSE) PATTERN ---
+        neg_pattern = np.where(h_pattern_physical == -1, 1, 0)
+        display_binary_pattern(neg_pattern)
+        
+        time.sleep(SYNC_DELAY)
+        _ = picam2.capture_array('main') # DUMMY READ
+        
+        frame_neg = picam2.capture_array('main')
+        y_channel_neg = frame_neg[:240, :]
+        I_neg = float(np.sum(y_channel_neg))
+        
+        # --- DIFFERENTIAL MEASUREMENT ---
+        differential_intensities[i] = I_pos - I_neg
+
+        if i % 50 == 0:
+            print(f"Captured {i}/{num_pixels} pattern pairs...")
+
+    print(f"Acquisition complete in {time.time() - start_time:.2f} seconds.")
+
+    # ==============================================================================
+    # 5. RECONSTRUCTION & IMAGE SAVING (RAW vs SVD FILTERED)
+    # ==============================================================================
+    print("Reconstructing 32x16 ghost images...")
+    
+    # --- A. RAW RECONSTRUCTION ---
+    ghost_image_1d = np.dot(differential_intensities, H_matrix)
+    
+    # THE MATH REVERSION: Only remove the pure DC Bias (Index 0).
+    # This leaves the macro-gradients intact so it can draw your hollow square.
+    ghost_image_1d[0] = 0 
+    
+    # Clip extreme mathematical outliers to protect contrast
+    p2, p98 = np.percentile(ghost_image_1d, (2, 98))
+    ghost_image_1d = np.clip(ghost_image_1d, p2, p98)
+    
+    ghost_image_raw = ghost_image_1d.reshape((logical_height, logical_width))
+    ghost_image_raw_norm = cv2.normalize(ghost_image_raw, None, 0, 255, cv2.NORM_MINMAX)
+    ghost_image_raw_norm = np.uint8(ghost_image_raw_norm)
+
+    # IMAGE 1: Raw Grayscale
+    display_raw_gray = cv2.resize(ghost_image_raw_norm, (640, 320), interpolation=cv2.INTER_NEAREST)
+    cv2.imwrite("1_raw_gray.png", display_raw_gray)
+    
+    # IMAGE 2: Raw Binarized (Threshold)
+    _, raw_thresh = cv2.threshold(ghost_image_raw_norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    display_raw_thresh = cv2.resize(raw_thresh, (640, 320), interpolation=cv2.INTER_NEAREST)
+    cv2.imwrite("2_raw_thresh.png", display_raw_thresh)
+
+    # --- B. SVD NOISE FILTERING ---
+    print("Applying SVD Rank Truncation...")
+    
+    # Convert image to float for linear algebra operations
+    img_float = np.float32(ghost_image_raw_norm)
+    
+    # Decompose the image matrix into U, Sigma (S), and V-transpose
+    U, S, Vt = np.linalg.svd(img_float, full_matrices=False)
+    
+    # THE SVD UPGRADE: Increased to k=15 to capture complex geometric shapes
+    k = 15 
+    svd_filtered_float = U[:, :k] @ np.diag(S[:k]) @ Vt[:k, :]
+    
+    svd_filtered_norm = cv2.normalize(svd_filtered_float, None, 0, 255, cv2.NORM_MINMAX)
+    svd_filtered_norm = np.uint8(svd_filtered_norm)
+
+    # IMAGE 3: SVD Filtered Grayscale
+    display_svd_gray = cv2.resize(svd_filtered_norm, (640, 320), interpolation=cv2.INTER_NEAREST)
+    cv2.imwrite("3_svd_filtered_gray.png", display_svd_gray)
+
+    # IMAGE 4: SVD Filtered Binarized (Threshold)
+    _, svd_thresh = cv2.threshold(svd_filtered_norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    display_svd_thresh = cv2.resize(svd_thresh, (640, 320), interpolation=cv2.INTER_NEAREST)
+    cv2.imwrite("4_svd_filtered_thresh.png", display_svd_thresh)
+    
+    print("Success! Saved all 4 images (Raw & SVD filtered).")
+
+except Exception as e:
+    print(f"Error: {e}")
+
+finally:
+    picam2.stop()
+    framebuffer.fill(0)
+    matrix.show()
+    cv2.destroyAllWindows()
