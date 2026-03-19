@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hardware BOM - CGI-UAV.OS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #0f1115; color: #e8e8e8; }
+        .sidebar { background-color: #171a21; border-right: 1px solid #232834; }
+        .card { background-color: #1e222b; border: 1px solid #2d3342; }
+        .accent { color: #3b82f6; } 
+    </style>
+</head>
+<body class="flex h-screen font-sans overflow-hidden">
+    
+    <div class="w-64 sidebar p-6 hidden md:flex flex-col shadow-2xl z-10">
+        <h2 class="text-xl font-bold mb-8 text-white tracking-wider">CGI-UAV<span class="accent">.OS</span></h2>
+        <nav class="space-y-4 text-sm text-gray-400">
+            <a href="index.html#overview" class="block hover:text-white transition">Project Overview</a>
+            <a href="assets/CGI_CAD_Files.zip" download class="block hover:text-white transition">Modular CAD Files (.STL/.STEP)</a>
+            <a href="assets/Sourcing_Manifest.csv" download class="block hover:text-white transition">Hardware Bill of Materials</a>
+            <a href="https://github.com/cgi-uav/core" target="_blank" class="block hover:text-white transition">CGI-Core Python Library</a>
+            <a href="https://github.com/cgi-uav/firmware" target="_blank" class="block hover:text-white transition">ESP32 Flight Controller</a>
+            <a href="bom.html" class="block text-white font-semibold flex items-center transition"><span class="w-2 h-2 rounded-full bg-blue-500 mr-2"></span>Interactive BOM</a>
+            <a href="wiki.html" class="block hover:text-white transition">Assembly Wiki</a>
+        </nav>
+        <div class="mt-auto">
+            <a href="https://github.com/cgi-uav" target="_blank" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition flex justify-center items-center">
+                View GitHub Org
+            </a>
+        </div>
+    </div>
+
+    <div class="flex-1 p-10 overflow-y-auto">
+        <h1 class="text-4xl font-extrabold text-white mb-2">Hardware Bill of Materials</h1>
+        <p class="text-gray-400 mb-8">Complete parts list and recommended tools for assembling the CGI-UAV framework.</p>
+
+        <div class="card rounded-lg shadow-lg overflow-hidden mb-8">
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="bg-gray-800 text-gray-300 text-sm uppercase tracking-wider">
+                        <th class="p-4 border-b border-gray-700">Category</th>
+                        <th class="p-4 border-b border-gray-700">Component</th>
+                        <th class="p-4 border-b border-gray-700">Specifications</th>
+                        <th class="p-4 border-b border-gray-700 text-center">Qty</th>
+                    </tr>
+                </thead>
+                <tbody class="text-sm text-gray-400">
+                    <tr class="border-b border-gray-700 hover:bg-[#232834] transition">
+                        <td class="p-4 font-semibold text-white">Compute</td>
+                        <td class="p-4">ESP32-S3 Microcontroller</td>
+                        <td class="p-4">Primary flight controller</td>
+                        <td class="p-4 text-center">1</td>
+                    </tr>
+                    <tr class="border-b border-gray-700 hover:bg-[#232834] transition">
+                        <td class="p-4 font-semibold text-white">Compute</td>
+                        <td class="p-4">Raspberry Pi 5</td>
+                        <td class="p-4">CGI Edge computing node</td>
+                        <td class="p-4 text-center">1</td>
+                    </tr>
+                    <tr class="border-b border-gray-700 hover:bg-[#232834] transition">
+                        <td class="p-4 font-semibold text-white">Compute</td>
+                        <td class="p-4">LSM9DS1 IMU</td>
+                        <td class="p-4">9-DoF orientation sensor</td>
+                        <td class="p-4 text-center">1</td>
+                    </tr>
+                    <tr class="border-b border-gray-700 hover:bg-[#232834] transition">
+                        <td class="p-4 font-semibold text-white">Propulsion</td>
+                        <td class="p-4">Brushless Motors</td>
+                        <td class="p-4">2300KV</td>
+                        <td class="p-4 text-center">4</td>
+                    </tr>
+                    <tr class="border-b border-gray-700 hover:bg-[#232834] transition">
+                        <td class="p-4 font-semibold text-white">Propulsion</td>
+                        <td class="p-4">Electronic Speed Controllers (ESC)</td>
+                        <td class="p-4">20A BLHeli_S 2-4S (DSHOT, Through-hole)</td>
+                        <td class="p-4 text-center">4</td>
+                    </tr>
+                    <tr class="border-b border-gray-700 hover:bg-[#232834] transition">
+                        <td class="p-4 font-semibold text-white">Propulsion</td>
+                        <td class="p-4">Propellers</td>
+                        <td class="p-4">5-inch Triblade</td>
+                        <td class="p-4 text-center">4</td>
+                    </tr>
+                    <tr class="border-b border-gray-700 hover:bg-[#232834] transition">
+                        <td class="p-4 font-semibold text-white">Power</td>
+                        <td class="p-4">LiPo Battery</td>
+                        <td class="p-4">14.8v 3300mAh 60c (w/ Male Deans T-Plug)</td>
+                        <td class="p-4 text-center">1</td>
+                    </tr>
+                    <tr class="border-b border-gray-700 hover:bg-[#232834] transition">
+                        <td class="p-4 font-semibold text-white">Power</td>
+                        <td class="p-4">UBEC Voltage Regulator</td>
+                        <td class="p-4">5v 5A output</td>
+                        <td class="p-4 text-center">1</td>
+                    </tr>
+                    <tr class="hover:bg-[#232834] transition">
+                        <td class="p-4 font-semibold text-white">Frame</td>
+                        <td class="p-4">M3 Screws</td>
+                        <td class="p-4">12mm length (for motors)</td>
+                        <td class="p-4 text-center">16</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="card p-6 rounded-lg shadow-lg">
+            <h3 class="text-xl font-bold text-white mb-4">Required Tools ("Good to Have")</h3>
+            <ul class="grid grid-cols-2 gap-4 text-gray-400 text-sm list-disc list-inside">
+                <li>3D Printer (Min bed size: 140x140mm)</li>
+                <li>High Power Soldering Iron, Flux, & Solder</li>
+                <li>Wire Strippers & Electrical Tape</li>
+                <li>Drill & Screwdriver Kit</li>
+                <li>Small Breadboards (2x)</li>
+                <li>Extra structural screws (e.g., 4.13cm #6x1-5/8" drywall)</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html>
