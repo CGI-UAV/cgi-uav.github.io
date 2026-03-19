@@ -1,0 +1,654 @@
+// FULLY_INTEGRATED_FLIGHT_READY.ino
+// Hardware: ESP32-S3 + Adafruit LSM9DS1
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Wire.h>
+#include <math.h>
+
+#include <Adafruit_LSM9DS1.h>
+#include <Adafruit_Sensor.h>
+
+// =====================================================
+// FLIGHT & LOGGING SETTINGS
+// =====================================================
+// Logging is handled as a state machine to avoid overwhelming the serial buffer,
+// which would otherwise block the main control loop and cause the drone to crash.
+// 0 = Normal UI Mode
+// 1 = Graph 1: Sensor Filtering 
+// 2 = Graph 2: PID Step Response 
+// 3 = Graph 3: Dual-Core Architecture 
+const int LOGGING_MODE = 3; 
+
+// The core loop runs at 250Hz (every 4000 microseconds).
+// Faster loops give the PID controller more resolution to correct errors,
+// but if it's too fast, sensor noise dominates the derivative (D) term.
+const int CONTROL_HZ = 250;
+const unsigned long CONTROL_DT_US = 1000000UL / CONTROL_HZ;
+
+// Safety constraints to prevent the drone from flipping over on arming.
+const float MAX_ARM_ANGLE = 90.0f;
+
+// Feed-forward limits: scales the pilot's joystick (-1.0 to 1.0) to physical targets.
+const float MAX_PITCH_ROLL_ANGLE = 15.0f; // Max tilt in degrees
+const float MAX_YAW_RATE_DPS = 120.0f;    // Max rotation speed in deg/sec
+
+// =====================================================
+// DEFINES & STRUCTS
+// =====================================================
+// Struct used to pass clean, averaged IMU data out of the hardware function.
+struct ImuSample { float ax, ay, az, gx, gy, gz; };
+
+// =====================================================
+// WIFI & DUAL CORE
+// =====================================================
+const char* SSID = "NETGEAR27";
+const char* PASS = "V@g@bond10887";
+WebServer server(80);
+TaskHandle_t WebTask; // Pointer used by FreeRTOS to assign the web server to Core 0
+
+// =====================================================
+// IMU (LSM9DS1) STATE & MATH
+// =====================================================
+const int SDA_PIN = 8;
+const int SCL_PIN = 9;
+const uint32_t I2C_HZ = 400000; // Fast I2C (400kHz) is mandatory for a 250Hz loop
+
+Adafruit_LSM9DS1 lsm = Adafruit_LSM9DS1();
+
+// Complementary Filter Alpha. 
+// 98.5% of the angle comes from integrating the Gyroscope (fast, but drifts over time).
+// 1.5% of the angle comes from the Accelerometer (noisy from vibrations, but absolute to gravity).
+const float ALPHA = 0.985f;
+const int READ_AVG_N = 2; // Hardware oversampling to kill high-frequency vibration noise
+
+float gyroBiasX=0, gyroBiasY=0, gyroBiasZ=0;
+float accelRefRoll=0, accelRefPitch=0;
+float roll=0, pitch=0;
+
+// GYRO SMOOTHING FILTER VARIABLES
+// An Exponential Moving Average (EMA) low-pass filter. 
+// Formula: NewVal = (OldVal * (1 - Alpha)) + (RawVal * Alpha)
+// This smooths out motor vibrations so the PID D-term doesn't amplify the noise.
+float prevGyrX = 0, prevGyrY = 0, prevGyrZ = 0;
+const float GYRO_FILTER_ALPHA = 0.3f; // Lower = smoother but more delay/lag.
+
+volatile float rollRateDps=0, pitchRateDps=0, yawRateDps=0;
+
+// =====================================================
+// ESC / MOTORS
+// =====================================================
+// Motor layout follows a standard Quad-X configuration.
+const int M1_PIN = 4; // FL (Front Left)
+const int M2_PIN = 5; // FR (Front Right)
+const int M3_PIN = 6; // RR (Rear Right)
+const int M4_PIN = 7; // RL (Rear Left)
+
+const uint32_t ESC_FREQ = 50; // Standard PWM frequency for basic ESCs
+const int ESC_RES_BITS = 14;  // High resolution for smoother throttle stepping
+const int ESC_MIN_US = 1000;  // 1000us = 0% throttle
+const int ESC_MAX_US = 2000;  // 2000us = 100% throttle
+
+// Converts microseconds (1000-2000) to the 14-bit duty cycle required by the ESP32 hardware timer.
+static inline uint32_t usToDuty(int us) {
+  us = constrain(us, ESC_MIN_US, ESC_MAX_US);
+  return (uint32_t)((us * 16383UL) / 20000UL);
+}
+
+// =====================================================
+// CONTROL STATE
+// =====================================================
+volatile bool armed = false;
+volatile bool stabilizeEnabled = true;
+volatile int baseThrottleUs = 1000;
+
+// Inputs requested by the web server UI
+volatile float inputRoll = 0, inputPitch = 0, inputYaw = 0;   
+volatile float trimRoll = 0, trimPitch = 0, trimYaw = 0; 
+
+// Individual Motor Trims (used for fine-tuning center-of-gravity imbalances)
+volatile int trimM1 = 0, trimM2 = 0, trimM3 = 0, trimM4 = 0;
+
+volatile int manualM1=1000, manualM2=1000, manualM3=1000, manualM4=1000;
+volatile float trimRollDeg=0, trimPitchDeg=0;
+
+volatile unsigned long lastCmdMs = 0;
+const unsigned long CMD_TIMEOUT_MS = 1000; // Safety failsafe: if no command received in 1s, drop.
+
+// =====================================================
+// PID CONTROLLER VARIABLES
+// =====================================================
+// Cascaded PID Setup: 
+// Outer loop controls ANGLE (Target Angle - Current Angle = Desired Rate).
+// Inner loop controls RATE (Desired Rate - Current Gyro Rate = Motor Output).
+float Kp_angle_roll=4.0f, Kp_angle_pitch=4.0f;
+float Kp_rate_roll=0.20f, Ki_rate_roll=0.05f, Kd_rate_roll=0.0f;
+float Kp_rate_pitch=0.20f, Ki_rate_pitch=0.05f, Kd_rate_pitch=0.0f;
+float Kp_rate_yaw=0.20f, Ki_rate_yaw=0.10f, Kd_rate_yaw=0.0f;
+
+float i_rRate=0, i_pRate=0, i_yRate=0;             // Integral accumulators
+float lastErrRRate=0, lastErrPRate=0, lastErrYRate=0; // Previous error for Derivative math
+
+// Limits how much of the motor bandwidth the PID is allowed to command.
+// Prevents a hard roll from saturating the motors and causing a loss of throttle/altitude.
+const float ROLL_CORR_LIMIT_US=300.0f, PITCH_CORR_LIMIT_US=300.0f, YAW_CORR_LIMIT_US=200.0f;
+
+unsigned long lastControlMicros=0;
+unsigned long lastDebugMs=0;
+
+// Graphing Debug Variables
+volatile float dbg_rawGyrX=0, dbg_gyrX=0, dbg_targetP=0, dbg_pd=0;
+volatile float dbg_rollCorr=0, dbg_pitchCorr=0;
+volatile int dbg_m1=1000, dbg_m2=1000, dbg_m3=1000, dbg_m4=1000;
+
+// =====================================================
+// HARDWARE FUNCS
+// =====================================================
+
+// Reads the IMU multiple times and averages the result to act as a rudimentary 
+// hardware-level low-pass filter against propeller vibrations.
+bool imuReadAveraged(ImuSample &out) {
+  float sax=0, say=0, saz=0, sgx=0, sgy=0, sgz=0;
+  int ok=0; sensors_event_t a, m, g, temp;
+  for (int i=0; i<READ_AVG_N; i++) {
+     lsm.getEvent(&a, &m, &g, &temp);
+     sax += a.acceleration.x; say += a.acceleration.y; saz += a.acceleration.z;
+     sgx += g.gyro.x; sgy += g.gyro.y; sgz += g.gyro.z;
+     ok++;
+  }
+  if (ok==0) return false;
+  out.ax = sax/ok; out.ay = say/ok; out.az = saz/ok;
+  out.gx = sgx/ok; out.gy = sgy/ok; out.gz = sgz/ok;
+  return true;
+}
+
+// Uses Trigonometry to convert raw 3D acceleration vectors into 2D Euler angles (Roll/Pitch).
+void accelToAngles(float ax, float ay, float az, float &R, float &P) {
+  if (az == 0.0f && ax == 0.0f && ay == 0.0f) { R=0; P=0; return; }
+  R = atan2(ay, az); 
+  P = atan2(-ax, sqrt(ay*ay+az*az));
+}
+
+bool configureLSM() {
+  if (!lsm.begin()) return false;
+  lsm.setupAccel(lsm.LSM9DS1_ACCELRANGE_4G);   // 4G covers drone bumps without clipping
+  lsm.setupGyro(lsm.LSM9DS1_GYROSCALE_500DPS); // 500 Deg/Sec is enough for stabilized flight
+  lsm.setupMag(lsm.LSM9DS1_MAGGAIN_4GAUSS);
+  return true;
+}
+
+// Samples the IMU 500 times on boot to find the "zero" point for the gyros (which naturally drift)
+// and establishes the level attitude based on the surface it booted on.
+void calibrateIMU() {
+  double sgx=0,sgy=0,sgz=0, sax=0,say=0,saz=0; int ok=0; ImuSample s;
+  Serial.println("Keep drone stationary..."); delay(1000);
+  for (int i=0; i<500; i++) {
+    if (imuReadAveraged(s)) {
+      sgx += s.gx; sgy += s.gy; sgz += s.gz;
+      sax += s.ax; say += s.ay; saz += s.az; ok++;
+    }
+    delay(2);
+  }
+  if (ok==0) { Serial.println("Fail"); while(1); }
+  
+  // Calculate average bias/error
+  gyroBiasX=sgx/ok; gyroBiasY=sgy/ok; gyroBiasZ=sgz/ok;
+  float initAx = sax/ok; float initAy = say/ok; float initAz = saz/ok;
+  
+  float ar, ap; accelToAngles(initAx, initAy, initAz, ar, ap);
+  accelRefRoll=ar; accelRefPitch=ap; roll=ar; pitch=ap;
+}
+
+bool setupEscPwm() {
+  if(!ledcAttach(M1_PIN, ESC_FREQ, ESC_RES_BITS)) return false;
+  if(!ledcAttach(M2_PIN, ESC_FREQ, ESC_RES_BITS)) return false;
+  if(!ledcAttach(M3_PIN, ESC_FREQ, ESC_RES_BITS)) return false;
+  if(!ledcAttach(M4_PIN, ESC_FREQ, ESC_RES_BITS)) return false;
+  return true;
+}
+
+void writeEsc(int pin, int us) { ledcWrite(pin, usToDuty(us)); }
+
+void setAll(int us) { 
+  writeEsc(M1_PIN, us); writeEsc(M2_PIN, us); writeEsc(M3_PIN, us); writeEsc(M4_PIN, us); 
+  dbg_m1=us; dbg_m2=us; dbg_m3=us; dbg_m4=us; 
+}
+
+// =====================================================
+// PID CONTROL MATH
+// =====================================================
+// The core algorithm keeping the drone in the air.
+// Proportional (P): Corrects current error. (Pushes back proportionally to how far it tilted).
+// Integral (I): Corrects past error. (Winds up over time to fix steady imbalances, like a heavy battery).
+// Derivative (D): Predicts future error. (Dampens the P-term to stop overshoot and bouncing).
+float pidRate(float tgt, float meas, float &i, float &le, float kp, float ki, float kd, float dt) {
+  float err = tgt - meas;
+  
+  // Accumulate I-term over time (Error * DeltaTime)
+  i += err * dt; 
+  
+  // Anti-Windup constraint: Prevents the I-term from growing infinitely if the drone gets stuck
+  i = constrain(i, -400.0f, 400.0f); 
+  
+  // Calculate slope of the error for the D-term (Change in Error / DeltaTime)
+  float d = (err - le) / dt; 
+  le = err;
+  
+  return (kp * err) + (ki * i) + (kd * d);
+}
+
+// Ramping array prevents instant 0-100% throttle spikes from frying the ESCs
+int rampUs[4] = {1000,1000,1000,1000};
+const float RAMP_SPD = 6000.0f; // Max microsecond change per second
+
+// Main control loop - must run incredibly fast and without interruption
+void controlLoopTick() {
+  unsigned long now = micros();
+  // Enforce precise loop timing (250Hz)
+  if (now - lastControlMicros < CONTROL_DT_US) return;
+  float dt = (now - lastControlMicros)/1000000.0f; lastControlMicros=now;
+
+  // Failsafe: If the loop lagged heavily (e.g., WiFi blocked it), reset dt to prevent 
+  // massive math spikes in the PID integrals.
+  if (dt > 0.015f) dt = 0.004f; 
+
+  ImuSample s;
+  if(imuReadAveraged(s)) {
+     // 1. Subtract the zero-bias calibrated at boot
+     float accX = s.ax; float accY = s.ay; float accZ = s.az;
+     float rawGyrX = s.gx - gyroBiasX; float rawGyrY = s.gy - gyroBiasY; float rawGyrZ = s.gz - gyroBiasZ;
+
+     // 2. Apply Software Low-Pass Filter to Gyros
+     float gyrX = (prevGyrX * (1.0f - GYRO_FILTER_ALPHA)) + (rawGyrX * GYRO_FILTER_ALPHA);
+     float gyrY = (prevGyrY * (1.0f - GYRO_FILTER_ALPHA)) + (rawGyrY * GYRO_FILTER_ALPHA);
+     float gyrZ = (prevGyrZ * (1.0f - GYRO_FILTER_ALPHA)) + (rawGyrZ * GYRO_FILTER_ALPHA);
+     prevGyrX = gyrX; prevGyrY = gyrY; prevGyrZ = gyrZ;
+
+     dbg_rawGyrX = rawGyrX * 180.0f/PI;
+     dbg_gyrX = gyrX * 180.0f/PI;
+
+     // Convert to user-friendly degrees per second for PID tuning
+     rollRateDps = gyrX*180.0f/PI; pitchRateDps = gyrY*180.0f/PI; yawRateDps = gyrZ*180.0f/PI;
+     
+     // Deadband filter: Ignore tiny yaw drifts so the drone doesn't constantly spin slightly
+     if (abs(yawRateDps) < 1.5f) { yawRateDps = 0.0f; }
+     
+     // 3. Complementary Filter: Fuse raw Accelerometer vectors with Gyro rates
+     float ar, ap; accelToAngles(accX, accY, accZ, ar, ap);
+     roll = ALPHA*(roll + gyrX*dt) + (1.0f-ALPHA)*ar;
+     pitch = ALPHA*(pitch + gyrY*dt) + (1.0f-ALPHA)*ap;
+  }
+
+  // Safety Cutoff Check
+  if (armed && (millis()-lastCmdMs > CMD_TIMEOUT_MS)) {
+    armed=false; baseThrottleUs=1000; inputRoll=0; inputPitch=0; inputYaw=0;
+    Serial.println("Failsafe Timeout");
+  }
+
+  if (!armed) { 
+    setAll(1000); 
+    for(int i=0;i<4;i++) rampUs[i]=1000; 
+  } else {
+    // Convert absolute angles to degrees and find deviation from level
+    float rd = (roll-accelRefRoll)*180.0f/PI; float pd = (pitch-accelRefPitch)*180.0f/PI;
+   
+    // Map pilot input to physical target angles
+    // INVERTED TARGETS (Locked from V72)
+    float targetR = (-inputRoll  * MAX_PITCH_ROLL_ANGLE) + trimRoll;
+    float targetP = (-inputPitch * MAX_PITCH_ROLL_ANGLE) + trimPitch;
+    float targetYRate = (-inputYaw * MAX_YAW_RATE_DPS) + trimYaw;
+
+    dbg_targetP = targetP;
+    dbg_pd = pd;
+
+    // OUTER LOOP: Calculate desired angular rate to achieve the target angle
+    float rrT = Kp_angle_roll * ((targetR+trimRollDeg)-rd);
+    float prT = Kp_angle_pitch * ((targetP+trimPitchDeg)-pd);
+    rrT = constrain(rrT, -200, 200); prT = constrain(prT, -200, 200);
+
+    float rc=0, pc=0, yc=0;
+   
+    // Zero out the Integral memory if throttle is low, otherwise it will "wind up" 
+    // trying to correct errors while sitting on the ground, causing it to flip on takeoff.
+    if (baseThrottleUs < 1050) { i_rRate = 0; i_pRate = 0; i_yRate = 0; }
+
+    // INNER LOOP: Generate the microsecond correction pulses using the Gyro rates
+    rc = pidRate(rrT, rollRateDps, i_rRate, lastErrRRate, Kp_rate_roll, Ki_rate_roll, Kd_rate_roll, dt);
+    pc = pidRate(prT, pitchRateDps, i_pRate, lastErrPRate, Kp_rate_pitch, Ki_rate_pitch, Kd_rate_pitch, dt);
+    yc = pidRate(targetYRate, yawRateDps, i_yRate, lastErrYRate, Kp_rate_yaw, Ki_rate_yaw, Kd_rate_yaw, dt);
+    
+    // Constrain the PID outputs so they don't overpower the base throttle
+    rc = constrain(rc, -ROLL_CORR_LIMIT_US, ROLL_CORR_LIMIT_US);
+    pc = constrain(pc, -PITCH_CORR_LIMIT_US, PITCH_CORR_LIMIT_US);
+    yc = constrain(yc, -YAW_CORR_LIMIT_US, YAW_CORR_LIMIT_US);
+   
+    dbg_rollCorr=rc; dbg_pitchCorr=pc;
+
+    // =====================================================
+    // DYNAMIC MIXING MATRIX
+    // =====================================================
+    // Converts the 3 abstract physical axes (Roll, Pitch, Yaw) into 4 specific motor speeds.
+    // E.g., To pitch forward, M3 and M4 (Rear) speed up (+pc), M1 and M2 (Front) slow down (-pc).
+    int m1 = baseThrottleUs - rc - pc + yc + trimM1; // Front Left  (Spins CW)
+    int m2 = baseThrottleUs + rc - pc - yc + trimM2; // Front Right (Spins CCW)
+    int m3 = baseThrottleUs + rc + pc + yc + trimM3; // Rear Right  (Spins CW)
+    int m4 = baseThrottleUs - rc + pc - yc + trimM4; // Rear Left   (Spins CCW)
+   
+    int t[4]={constrain(m1,1000,2000), constrain(m2,1000,2000), constrain(m3,1000,2000), constrain(m4,1000,2000)};
+
+    // Motor Ramping (Soft Start logic)
+    float step = RAMP_SPD * dt;
+    for(int i=0;i<4;i++) {
+      int d = t[i] - rampUs[i];
+      if (abs(d) <= step) rampUs[i] = t[i];
+      else rampUs[i] += (d>0 ? step : -step);
+      
+      if(i==0) writeEsc(M1_PIN, rampUs[i]);
+      if(i==1) writeEsc(M2_PIN, rampUs[i]);
+      if(i==2) writeEsc(M3_PIN, rampUs[i]);
+      if(i==3) writeEsc(M4_PIN, rampUs[i]);
+    }
+    dbg_m1=rampUs[0]; dbg_m2=rampUs[1]; dbg_m3=rampUs[2]; dbg_m4=rampUs[3];
+  }
+
+  // =====================================================
+  // CSV DATA LOGGING (50Hz to prevent Serial bottleneck)
+  // =====================================================
+  if(millis() - lastDebugMs > 20) {
+    lastDebugMs = millis();
+    
+    if (LOGGING_MODE == 0) {
+      Serial.printf("R:%.1f P:%.1f TrimP:%.1f TrimY:%.1f dt:%.4f\n",
+         (roll-accelRefRoll)*180/PI, (pitch-accelRefPitch)*180/PI, trimPitch, trimYaw, dt);
+    } 
+    else if (LOGGING_MODE == 1) {
+      Serial.printf("%lu,%.2f,%.2f\n", millis(), dbg_rawGyrX, dbg_gyrX);
+    }
+    else if (LOGGING_MODE == 2) {
+      if (armed) Serial.printf("%lu,%.2f,%.2f\n", millis(), dbg_targetP, dbg_pd);
+    }
+    else if (LOGGING_MODE == 3) {
+      Serial.printf("%lu,%.5f\n", millis(), dt);
+    }
+  }
+}
+
+// =====================================================
+// WEB SERVER TASK (CORE 0)
+// =====================================================
+// Because the ESP32 is dual-core, we pin the WebServer and WiFi stack to Core 0.
+// This ensures that rendering the HTML and handling HTTP POST packets never interrupts
+// the controlLoopTick() running on Core 1.
+void webTaskCode(void * parameter) {
+  for(;;) {
+    server.handleClient();
+    vTaskDelay(2 / portTICK_PERIOD_MS); // Yield to the FreeRTOS watchdog
+  }
+}
+
+// =====================================================
+// UI
+// =====================================================
+String makeUI() {
+  String h = R"HTML(
+<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"><title>Flight V75</title>
+<style>
+ body{font-family:monospace;background:#0f1115;color:#e8e8e8;margin:0;padding:12px;touch-action:manipulation;user-select:none;}
+ .card{background:#171a21;border:1px solid #232834;border-radius:12px;padding:12px;margin-bottom:10px}
+ .row{display:flex;gap:10px;flex-wrap:wrap}
+ button{padding:12px;border-radius:8px;border:0;cursor:pointer;background:#2a3142;color:#fff;font-size:16px;touch-action:manipulation;transition:0.2s}
+ .danger{background:#b00020}.good{background:#1f6f3a}.warn{background:#7a4b00}
+ input[type=range]{width:100%;margin:10px 0}
+ input[type=number]{width:60px; background:#000; color:#0f0; border:1px solid #444; border-radius:4px; text-align:right; font-family:monospace; font-size:14px; padding:2px;}
+ .pill{background:#0d1220;padding:5px;border-radius:4px;border:1px solid #222;font-size:12px;display:flex;justify-content:space-between; align-items:center;}
+ label{font-size:13px;opacity:0.8;display:flex;justify-content:space-between; margin-bottom:5px;}
+ .stat{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+ .key-ind{text-align:center;padding:5px;background:#222;border-radius:4px;color:#555;}
+ .k-act{background:#0af;color:#fff;font-weight:bold;}
+ .instr{font-size:12px;color:#aaa;text-align:center;margin-top:5px;}
+</style></head><body>
+<div class="card"><h3>Flight Ready V75</h3></div>
+<div class="card stat">
+ <div class="pill"><span>St:</span><span id="st">?</span></div> <div class="pill"><span>Bat:</span><span id="lnk">?</span></div>
+ <div class="pill"><span>M1(FL):</span><span id="m1">0</span></div> <div class="pill"><span>M2(FR):</span><span id="m2">0</span></div>
+ <div class="pill"><span>M3(RR):</span><span id="m3">0</span></div> <div class="pill"><span>M4(RL):</span><span id="m4">0</span></div>
+</div>
+<div class="card">
+  <label>Controls</label>
+  <div class="row" style="justify-content:center;">
+    <div id="kQ" class="key-ind">Q</div><div id="kW" class="key-ind">W</div><div id="kE" class="key-ind">E</div>
+  </div>
+  <div class="row" style="justify-content:center;">
+    <div id="kA" class="key-ind">A</div><div id="kS" class="key-ind">S</div><div id="kD" class="key-ind">D</div>
+  </div>
+  <div class="instr">ENTER: Arm | SPACE: Kill | ARROWS: Throttle</div>
+</div>
+
+<div class="card">
+  <label>PID Tuning (Roll & Pitch)</label>
+  <div class="stat">
+    <div class="pill"><span>Ang P:</span><input type="number" id="ap" step="0.1" value="4.0" onchange="send()"></div>
+    <div class="pill"><span>Rate P:</span><input type="number" id="rp" step="0.01" value="0.20" onchange="send()"></div>
+    <div class="pill"><span>Rate I:</span><input type="number" id="ri" step="0.01" value="0.05" onchange="send()"></div>
+    <div class="pill"><span>Rate D:</span><input type="number" id="rd" step="0.001" value="0.000" onchange="send()"></div>
+  </div>
+  <label style="margin-top:10px;">PID Tuning (Yaw)</label>
+  <div class="stat">
+    <div class="pill"><span>Rate P:</span><input type="number" id="yp" step="0.01" value="0.20" onchange="send()"></div>
+    <div class="pill"><span>Rate I:</span><input type="number" id="yi" step="0.01" value="0.10" onchange="send()"></div>
+  </div>
+</div>
+
+<div class="card">
+  <label>Motor Trims (Offset us)</label>
+  <div class="stat">
+    <div class="pill"><span>M1 (FL):</span><input type="number" id="tm1" step="5" value="0" onchange="send()"></div>
+    <div class="pill"><span>M2 (FR):</span><input type="number" id="tm2" step="5" value="0" onchange="send()"></div>
+    <div class="pill"><span>M3 (RR):</span><input type="number" id="tm3" step="5" value="0" onchange="send()"></div>
+    <div class="pill"><span>M4 (RL):</span><input type="number" id="tm4" step="5" value="0" onchange="send()"></div>
+  </div>
+  <button class="good" style="width:100%;margin-top:10px;background:#1a4d2e" onclick="autoTrim()">AUTO-CALCULATE TRIM</button>
+</div>
+
+<div class="card">
+ <button id="stabBtn" class="warn" style="width:100%;margin-bottom:10px" onclick="tStab()">AUTO: ON</button>
+ <label><span>Throttle</span> <span id="td">1000</span></label>
+ <input id="thr" type="range" min="1000" max="2000" value="1000" oninput="document.getElementById('td').innerText=this.value">
+</div>
+<script>
+const els={thr:document.getElementById('thr')};
+let state={stab:true};
+let ks={r:0,p:0,y:0};
+const keys={w:false,a:false,s:false,d:false,q:false,e:false};
+function upB(){
+  document.getElementById('stabBtn').innerText=state.stab?"AUTO: ON":"AUTO: OFF";
+  document.getElementById('stabBtn').className=state.stab?"good":"warn";
+}
+function uk(){
+  document.getElementById('kQ').className='key-ind '+(keys.q?'k-act':'');
+  document.getElementById('kW').className='key-ind '+(keys.w?'k-act':'');
+  document.getElementById('kE').className='key-ind '+(keys.e?'k-act':'');
+  document.getElementById('kA').className='key-ind '+(keys.a?'k-act':'');
+  document.getElementById('kS').className='key-ind '+(keys.s?'k-act':'');
+  document.getElementById('kD').className='key-ind '+(keys.d?'k-act':'');
+  ks.p = (keys.w ? -1 : 0) + (keys.s ? 1 : 0);
+  ks.r = (keys.a ? -1 : 0) + (keys.d ? 1 : 0);
+  ks.y = (keys.q ? -1 : 0) + (keys.e ? 1 : 0);
+}
+document.addEventListener('keydown',async e=>{
+  const k=e.key.toLowerCase();
+  if(e.code==='Space' || k===' '){ e.preventDefault(); await fetch('/disarm'); }
+  else if(e.code==='Enter' || k==='enter'){
+    e.preventDefault(); const r=await fetch('/arm');
+    if(r.status===400) alert("Cannot ARM! Check Throttle/Angle.");
+  }
+  else if(e.key === "ArrowUp") {
+    e.preventDefault(); els.thr.value = Math.min(2000, parseInt(els.thr.value) + 25);
+    document.getElementById('td').innerText = els.thr.value; send();
+  }
+  else if(e.key === "ArrowDown") {
+    e.preventDefault(); els.thr.value = Math.max(1000, parseInt(els.thr.value) - 25);
+    document.getElementById('td').innerText = els.thr.value; send();
+  }
+  else if(keys.hasOwnProperty(k)){ keys[k]=true; uk(); send(); }
+});
+document.addEventListener('keyup',e=>{
+  const k=e.key.toLowerCase();
+  if(keys.hasOwnProperty(k)){ keys[k]=false; uk(); send(); }
+});
+function send(){
+ const b={
+   t:parseInt(els.thr.value), s:state.stab?1:0,
+   cr:ks.r, cp:ks.p, cy:ks.y,
+   
+   ap:parseFloat(document.getElementById('ap').value),
+   rp:parseFloat(document.getElementById('rp').value),
+   ri:parseFloat(document.getElementById('ri').value),
+   rd:parseFloat(document.getElementById('rd').value),
+   yp:parseFloat(document.getElementById('yp').value),
+   yi:parseFloat(document.getElementById('yi').value),
+
+   tm1:parseInt(document.getElementById('tm1').value),
+   tm2:parseInt(document.getElementById('tm2').value),
+   tm3:parseInt(document.getElementById('tm3').value),
+   tm4:parseInt(document.getElementById('tm4').value)
+ };
+ fetch('/cmd',{method:'POST',body:JSON.stringify(b)}).catch(()=>{});
+}
+async function autoTrim() {
+  try {
+    const res = await fetch('/autotrim', {method: 'POST'});
+    if(res.status === 400) { alert("Drone must be ARMED to calculate trim!"); return; }
+    const data = await res.json();
+    document.getElementById('tm1').value = data.tm1; document.getElementById('tm2').value = data.tm2;
+    document.getElementById('tm3').value = data.tm3; document.getElementById('tm4').value = data.tm4;
+    send(); 
+    alert("Trims applied!");
+  } catch (e) { alert("Error calculating trim."); }
+}
+setInterval(send, 150);
+setInterval(async()=>{
+ try{
+  const r=await fetch('/status');const j=await r.json();
+  document.getElementById('lnk').innerText="OK";document.getElementById('lnk').style.color="#0f0";
+  document.getElementById('st').innerText=j.armed?"ARMED":"DIS";document.getElementById('st').style.color=j.armed?"#f00":"#fff";
+  document.getElementById('td').innerText=j.throttle;
+  document.getElementById('m1').innerText=j.m1;document.getElementById('m2').innerText=j.m2;
+  document.getElementById('m3').innerText=j.m3;document.getElementById('m4').innerText=j.m4;
+ }catch{document.getElementById('lnk').innerText="LOST";document.getElementById('lnk').style.color="#f00";}
+},250);
+function tStab(){state.stab=!state.stab;upB();send();}
+els.thr.oninput=send;
+</script></body></html>
+)HTML";
+  return h;
+}
+
+// =====================================================
+// SERVER ENDPOINTS
+// =====================================================
+bool ex(const String& b, const char* k, float &v) {
+  int i=b.indexOf(k); if(i<0)return false; int c=b.indexOf(':',i); if(c<0)return false;
+  int e=b.indexOf(',',c); if(e<0)e=b.indexOf('}',c); if(e<0)return false;
+  v=b.substring(c+1,e).toFloat(); return true;
+}
+void handleCmd() {
+  String b=server.arg("plain"); float v;
+  if(ex(b,"\"t\"",v)) baseThrottleUs=constrain((int)v,1000,2000);
+  if(ex(b,"\"s\"",v)) stabilizeEnabled=(v>0.5);
+  if(ex(b,"\"cr\"",v)) inputRoll=constrain(v, -1.0, 1.0);
+  if(ex(b,"\"cp\"",v)) inputPitch=constrain(v, -1.0, 1.0);
+  if(ex(b,"\"cy\"",v)) inputYaw=constrain(v, -1.0, 1.0);
+
+  if(ex(b,"\"ap\"",v)) { Kp_angle_roll=v; Kp_angle_pitch=v; }
+  if(ex(b,"\"rp\"",v)) { Kp_rate_roll=v; Kp_rate_pitch=v; }
+  if(ex(b,"\"ri\"",v)) { Ki_rate_roll=v; Ki_rate_pitch=v; }
+  if(ex(b,"\"rd\"",v)) { Kd_rate_roll=v; Kd_rate_pitch=v; }
+  if(ex(b,"\"yp\"",v)) { Kp_rate_yaw=v; }
+  if(ex(b,"\"yi\"",v)) { Ki_rate_yaw=v; }
+
+  if(ex(b,"\"tm1\"",v)) { trimM1 = (int)v; }
+  if(ex(b,"\"tm2\"",v)) { trimM2 = (int)v; }
+  if(ex(b,"\"tm3\"",v)) { trimM3 = (int)v; }
+  if(ex(b,"\"tm4\"",v)) { trimM4 = (int)v; }
+  
+  lastCmdMs=millis(); server.send(200,"text/plain","OK");
+}
+
+void handleStatus() {
+  String j="{"; j+="\"armed\":"+String(armed?"1":"0");
+  j+=",\"throttle\":"+String(baseThrottleUs);
+  j+=",\"m1\":"+String(dbg_m1); j+=",\"m2\":"+String(dbg_m2); j+=",\"m3\":"+String(dbg_m3); j+=",\"m4\":"+String(dbg_m4);
+  j+="}"; server.send(200,"application/json",j);
+}
+
+// =====================================================
+// SETUP & BOOT SEQUENCE
+// =====================================================
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n\n=== BOOTING V75 (FINAL) ===");
+
+  Wire.begin(SDA_PIN, SCL_PIN); 
+  Wire.setClock(I2C_HZ);
+
+  if(!configureLSM()) { Serial.println("LSM9DS1 Fail"); while(1) delay(100); }
+ 
+  Serial.println("Calibrating IMU...");
+  calibrateIMU();
+
+  if(!setupEscPwm()) { Serial.println("PWM Init Fail"); while(1) delay(100); }
+  setAll(1000);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(SSID, PASS);
+  Serial.print("Connecting WiFi");
+  while(WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+  Serial.println("\nIP: " + WiFi.localIP().toString());
+
+  server.on("/", [](){server.send(200,"text/html",makeUI());});
+  server.on("/status", handleStatus);
+  server.on("/cmd", HTTP_POST, handleCmd);
+  
+  server.on("/autotrim", HTTP_POST, [](){
+    if(!armed) { server.send(400, "text/plain", "Must be ARMED"); return; }
+    
+    // AutoTrim perfectly matched to V72 Mixer
+    trimM1 += (int)(-dbg_rollCorr - dbg_pitchCorr);
+    trimM2 += (int)( dbg_rollCorr - dbg_pitchCorr);
+    trimM3 += (int)( dbg_rollCorr + dbg_pitchCorr);
+    trimM4 += (int)(-dbg_rollCorr + dbg_pitchCorr);
+    
+    i_rRate=0; i_pRate=0; i_yRate=0; 
+    
+    String j="{\"tm1\":"; j+=trimM1; j+=",\"tm2\":"; j+=trimM2;
+    j+=",\"tm3\":"; j+=trimM3; j+=",\"tm4\":"; j+=trimM4; j+="}";
+    server.send(200, "application/json", j);
+  });
+  
+  server.on("/arm", [](){
+    float absR = abs((roll-accelRefRoll)*180/PI);
+    float absP = abs((pitch-accelRefPitch)*180/PI);
+    if(baseThrottleUs>1050 || absR>MAX_ARM_ANGLE || absP>MAX_ARM_ANGLE) {
+      server.send(400,"text/plain","NO"); return;
+    }
+    armed=true; i_rRate=0; i_pRate=0; i_yRate=0; lastCmdMs=millis();
+    server.send(200,"text/plain","OK");
+  });
+  server.on("/disarm", [](){ armed=false; baseThrottleUs=1000; server.send(200,"text/plain","OK"); });
+  server.on("/kill", [](){ armed=false; baseThrottleUs=1000; server.send(200,"text/plain","OK"); });
+  server.begin();
+ 
+  // Launch the WebTask onto Core 0. By default, the Arduino loop() runs on Core 1.
+  xTaskCreatePinnedToCore(webTaskCode, "WebTask", 10000, NULL, 1, &WebTask, 0);
+
+  Serial.println("Ready 250Hz - Physics on Core 1, Web on Core 0");
+}
+
+void loop() {
+  // Runs exclusively on Core 1
+  controlLoopTick();
+  yield(); // Feeds the watchdog timer to prevent ESP32 reboots
+}
+
