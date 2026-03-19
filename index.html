@@ -17,16 +17,20 @@
     <div class="w-64 sidebar p-6 hidden md:flex flex-col shadow-2xl z-10">
         <h2 class="text-xl font-bold mb-8 text-white tracking-wider">CGI-UAV<span class="accent">.OS</span></h2>
         <nav class="space-y-4 text-sm text-gray-400">
-            <a href="#overview" class="block text-white font-semibold flex items-center transition"><span class="w-2 h-2 rounded-full bg-blue-500 mr-2"></span>Project Overview</a>
+            <a href="index.html#overview" class="block text-white font-semibold flex items-center transition"><span class="w-2 h-2 rounded-full bg-blue-500 mr-2"></span>Project Overview</a>
+            
             <a href="assets/CGI_CAD_Files.zip" download class="block hover:text-white transition">Modular CAD Files (.STL/.STEP)</a>
-            <a href="https://github.com/redfox1111111/CGI-OpenSource-Framework/tree/main/core" target="_blank" class="block hover:text-white transition">CGI-Core Python Library</a>
-            <a href="https://github.com/redfox1111111/CGI-OpenSource-Framework/tree/main/firmware" target="_blank" class="block hover:text-white transition">ESP32 Flight Controller (V75)</a>
             <a href="assets/Sourcing_Manifest.csv" download class="block hover:text-white transition">Hardware Bill of Materials</a>
-            <a href="https://github.com/redfox1111111/CGI-OpenSource-Framework/wiki" target="_blank" class="block hover:text-white transition">Assembly Wiki</a>
+            
+            <a href="https://github.com/cgi-uav/core" target="_blank" class="block hover:text-white transition">CGI-Core Python Library</a>
+            <a href="https://github.com/cgi-uav/firmware" target="_blank" class="block hover:text-white transition">ESP32 Flight Controller (V75)</a>
+            
+            <a href="bom.html" class="block hover:text-white transition">Interactive Bill of Materials</a>
+            <a href="wiki.html" class="block hover:text-white transition">Assembly Wiki</a>
         </nav>
         <div class="mt-auto">
-            <a href="https://github.com/redfox1111111/CGI-OpenSource-Framework" target="_blank" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition flex justify-center items-center">
-                View on GitHub
+            <a href="https://github.com/cgi-uav" target="_blank" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition flex justify-center items-center">
+                View GitHub Org
             </a>
         </div>
     </div>
@@ -46,7 +50,8 @@
             <h3 class="text-2xl font-bold text-white mb-3">About the Framework</h3>
             <p class="text-gray-400 leading-relaxed">
                 The CGI-UAV framework is designed from the ground up for embedded systems and Edge AI efficiency. 
-                By utilizing Computational Ghost Imaging, this drone platform can reconstruct high-fidelity visuals in visually degraded environments where traditional optics fail.
+                By utilizing Computational Ghost Imaging, this drone platform can reconstruct high-fidelity visuals in visually degraded environments where traditional optics fail. 
+                Recently awarded 1st place in regional science and engineering competitions, this architecture is fully open-source to accelerate development in autonomous disaster response.
             </p>
         </div>
 
@@ -64,10 +69,10 @@
                     <svg class="w-6 h-6 mr-2 accent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>
                     Quick Start
                 </h3>
-                <p class="text-gray-400 mb-4 text-sm">Clone the repository and install the required edge-computing dependencies for the CGI pipeline.</p>
+                <p class="text-gray-400 mb-4 text-sm">Clone the core repository and install the edge-computing dependencies.</p>
                 <div class="bg-black p-4 rounded text-green-400 font-mono text-sm border border-gray-700 shadow-inner overflow-x-auto">
-                    <span class="text-gray-500">$</span> git clone https://github.com/redfox1111111/CGI-OpenSource-Framework.git<br>
-                    <span class="text-gray-500">$</span> cd CGI-OpenSource-Framework<br>
+                    <span class="text-gray-500">$</span> git clone https://github.com/cgi-uav/core.git<br>
+                    <span class="text-gray-500">$</span> cd core<br>
                     <span class="text-gray-500">$</span> pip install -r requirements.txt<br>
                     <span class="text-gray-500">$</span> python3 reconstruct.py --svd true
                 </div>
@@ -84,8 +89,8 @@
                         <a href="assets/CGI_CAD_Files.zip" download class="accent hover:text-blue-400 transition font-semibold">Download .ZIP</a>
                     </li>
                     <li class="flex justify-between border-b border-gray-700 pb-3">
-                        <span class="text-gray-300 font-medium">CGI Image Reconstruction Algorithm</span>
-                        <a href="https://github.com/redfox1111111/CGI-OpenSource-Framework/tree/main/core" target="_blank" class="accent hover:text-blue-400 transition font-semibold">View Docs</a>
+                        <span class="text-gray-300 font-medium">Assembly Instructions</span>
+                        <a href="wiki.html" class="accent hover:text-blue-400 transition font-semibold">Read Wiki</a>
                     </li>
                     <li class="flex justify-between pb-2">
                         <span class="text-gray-300 font-medium">Sourcing Manifest (< $500)</span>
